@@ -14,9 +14,6 @@ scene.background = new THREE.Color(0xf2f2f2);
 
 const textureLoader = new THREE.TextureLoader();
 
-gradientTexture.flipY = false;
-gradientTexture.colorSpace = THREE.SRGBColorSpace;
-
 const cameras = {};
 
 const clock = new THREE.Clock();
