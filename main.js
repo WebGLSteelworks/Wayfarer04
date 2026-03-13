@@ -14,7 +14,6 @@ scene.background = new THREE.Color(0xf2f2f2);
 
 const textureLoader = new THREE.TextureLoader();
 
-const gradientTexture = textureLoader.load('./textures/w_lens_gradient.jpg');
 gradientTexture.flipY = false;
 gradientTexture.colorSpace = THREE.SRGBColorSpace;
 
@@ -213,9 +212,6 @@ function loadModel(config) {
 	if (variantsExtension) {
 
 	  const variants = variantsExtension.variants;
-
-	  console.log("GLB Variants:", variants);
-
 	  createVariantButtons(variants);
 
 	}
