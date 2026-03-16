@@ -40,9 +40,6 @@ let activeCameraName = null;
 let glassAnimateCamera = null;
 let wasAnimatingGlass = false;
 
-const REFLECTION_TINT = 1.1;    // dark glass
-const REFLECTION_CLEAR = 0.18;  // trans glass
-
 
 // ─────────────────────────────
 // SELECT VARIANT
@@ -210,6 +207,10 @@ function loadModel(config) {
 
 	  const variants = variantsExtension.variants;
 	  createVariantButtons(variants);
+	  
+	  if (variants.length > 0) {
+		  selectVariant(currentModel, variants[0].name);
+		}
 
 	}
 	
