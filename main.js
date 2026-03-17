@@ -412,11 +412,11 @@ async function restartApp() {
   const isWebGPU = renderer.isWebGPURenderer;
 
 	scene.background = new THREE.Color(
-	  isWebGPU ? 0xffffff : 0xf2f2f2
+	  isWebGPU ? 0xffffff : 0xcccccc
 	);
 
 	// ambient LIGHTING
-//	scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+	scene.add(new THREE.AmbientLight(0xffffff, 5.0));
 
   // 🎮 controls 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -443,7 +443,7 @@ let controls;
 // ─────────────────────────────────────────────
 // AMBIENT LIGHTING
 // ─────────────────────────────────────────────
-//scene.add(new THREE.AmbientLight(0xffffff, 5.0));
+scene.add(new THREE.AmbientLight(0xffffff, 5.0));
 
 // ─────────────────────────────────────────────
 // ENVIRONMENT
@@ -816,7 +816,7 @@ async function init() {
 
 	// 🎨 background color
 	scene.background = new THREE.Color(
-	  isWebGPU ? 0xffffff : 0xf2f2f2
+	  isWebGPU ? 0xffffff : 0x000000
 	);
 
   // CONTROLS (ahora que renderer existe)
