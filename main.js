@@ -1,26 +1,46 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.176.0/+esm';
+import { WebGPURenderer } from 'https://cdn.jsdelivr.net/npm/three@0.176.0/webgpu/+esm';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.176.0/examples/jsm/controls/OrbitControls.js/+esm';
 import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.176.0/examples/jsm/loaders/GLTFLoader.js/+esm';
 import { EXRLoader } from 'https://cdn.jsdelivr.net/npm/three@0.176.0/examples/jsm/loaders/EXRLoader.js/+esm';
 
-import { CAMERAS } from './configs/cameras.js';
+import { CAMERAS } from './utils/cameras.js';
+
+async function isWebGPUSupported() {
+  if (!navigator.gpu) return false;
+
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return !!adapter;
+  } catch {
+    return false;
+  }
+}
 
 // ─────────────────────────────────────────────
 // GLOBAL VAR
 // ─────────────────────────────────────────────
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf2f2f2); 
-
+let scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
 const textureLoader = new THREE.TextureLoader();
 
 const cameras = {};
 
 const clock = new THREE.Clock();
 
+let fps = 0;
+let frames = 0;
+let lastTime = performance.now();
+let renderMode = 'auto'; // 'auto' | 'webgpu' | 'webgl'
+let isRendererReady = false;
+let animationId = null;
+
 let currentConfig = {
-  glb: './models/Standard_Wayfarer.glb',
-  
+
+  glbLow: './models/Standard_Wayfarer_low.glb',
+  glbHigh: './models/Standard_Wayfarer_high.glb',
+
   startCamera: 'Cam_Front',
 
   glass: {
@@ -132,34 +152,6 @@ function createVariantButtons(variants) {
 }
 
 
-// ─────────────────────────────
-// POSTPRODUCTION FOR MORE CONTRAST
-// ─────────────────────────────
-
-const ContrastShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    contrast: { value: 1.0 } // 1.0 = neutro
-  },
-  vertexShader: `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-    }
-  `,
-  fragmentShader: `
-    uniform sampler2D tDiffuse;
-    uniform float contrast;
-    varying vec2 vUv;
-    void main() {
-      vec4 color = texture2D(tDiffuse, vUv);
-      color.rgb = (color.rgb - 0.5) * contrast + 0.5;
-      gl_FragColor = color;
-    }
-  `
-};
-
 
 // ─────────────────────────────
 // LOAD GLB MODEL
@@ -174,16 +166,23 @@ function loadModel(config) {
   // ───── clean last model
   if (currentModel) {
     scene.remove(currentModel);
-    currentModel.traverse(obj => {
-      if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) {
-        if (Array.isArray(obj.material)) {
-          obj.material.forEach(m => m.dispose());
-        } else {
-          obj.material.dispose();
-        }
-      }
-    });
+	const isWebGPU = renderer.isWebGPURenderer;
+
+	currentModel.traverse(obj => {
+
+	  if (obj.geometry) obj.geometry.dispose();
+
+	  // ⚠️ SOLO WebGL
+	  if (!isWebGPU && obj.material) {
+
+		if (Array.isArray(obj.material)) {
+		  obj.material.forEach(m => m.dispose());
+		} else {
+		  obj.material.dispose();
+		}
+	  }
+
+	});
   }
 
   // state reset
@@ -194,10 +193,20 @@ function loadModel(config) {
   glassAnim.timer = 0;
   Object.keys(cameraTargets).forEach(k => delete cameraTargets[k]);
 
-  loader.load(config.glb, (gltf) => {
+	const isWebGPU = renderer.isWebGPURenderer;
+
+	const modelPath = isWebGPU
+	  ? config.glbHigh
+	  : config.glbLow;
+
+	console.log("Loading model:", modelPath);
+
+
+  loader.load(modelPath, (gltf) => {
 
     gltfData = gltf;
 	currentModel = gltf.scene;
+	
     scene.add(currentModel);
 	
 	// ───── get variants from GLB
@@ -241,9 +250,24 @@ function loadModel(config) {
 
 	currentModel.traverse(obj => {
 
-		if (!obj.isMesh) return;
-	
-    });
+	  if (!obj.isMesh) return;
+
+	  const mat = obj.material;
+	  if (!mat) return;
+
+	  const isWebGPU = renderer.isWebGPURenderer;
+
+	  // 🔥 REFLECTION BOOST 
+	  if (mat.envMapIntensity !== undefined) {
+		mat.envMapIntensity *= isWebGPU ? 1.5 : 1.0;
+	  }
+
+	  // 🔥 MICRO ROUGHNESS ADJ
+	  if (mat.roughness !== undefined) {
+		mat.roughness *= 0.95;
+	  }
+
+	});
 
     // load starting camera
     smoothSwitchCamera(config.startCamera);
@@ -309,115 +333,150 @@ let transition = {
 // ─────────────────────────────────────────────
 // RENDERER
 // ─────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.physicallyCorrectLights = true;
+let renderer;
 
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.25;
+async function initRenderer() {
+	
+  isRendererReady = false;
 
-document.body.appendChild(renderer.domElement);
+  let useWebGPU;
 
+	if (renderMode === 'webgpu') {
+	  useWebGPU = true;
+
+	} else if (renderMode === 'webgl') {
+	  useWebGPU = false;
+
+	} else {
+	  useWebGPU = await isWebGPUSupported();
+	}
+
+  if (useWebGPU) {
+    console.log("🚀 Using WebGPU");
+    rendererLabel.textContent = `Renderer: WebGPU | DPR: ${window.devicePixelRatio}`;
+
+    renderer = new WebGPURenderer({
+      antialias: true
+    });
+
+    await renderer.init();
+
+  } else {
+    console.log("⚠ Using WebGL");
+    rendererLabel.textContent = `Renderer: WebGL | ${window.innerWidth}x${window.innerHeight}`;
+
+    renderer = new THREE.WebGLRenderer({
+      antialias: true
+    });
+  }
+
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.physicallyCorrectLights = true;
+
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.3;
+
+  document.body.appendChild(renderer.domElement);
+  
+  isRendererReady = true;
+}
+
+
+async function restartApp() {
+	
+  if (animationId) {
+	  cancelAnimationFrame(animationId);
+	  animationId = null;
+	}	
+
+  console.log("Restarting app with mode:", renderMode);
+
+  // 🧹 clean renderer 
+  if (renderer) {
+    renderer.dispose();
+    renderer.domElement.remove();
+  }
+
+  // 🧹 clean model
+	if (currentModel) {
+	  scene.remove(currentModel);
+	  currentModel = null;
+	}
+
+  // 🧹 reset scene 
+  scene = new THREE.Scene();
+
+  await initRenderer();
+
+  const isWebGPU = renderer.isWebGPURenderer;
+
+	scene.background = new THREE.Color(
+	  isWebGPU ? 0xffffff : 0xf2f2f2
+	);
+
+	// ambient LIGHTING
+//	scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+  // 🎮 controls 
+  controls = new OrbitControls(camera, renderer.domElement);
+
+  controls.enabled = false;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.enableRotate = true;
+  controls.enableZoom = true;
+  controls.enablePan = false;
+  controls.minDistance = 0.5;
+  controls.maxDistance = 1.2;
+
+  setupEnvironment();
+  loadModel(currentConfig);
+  animate();
+}
 
 // ─────────────────────────────────────────────
 // CONTROLS
 // ─────────────────────────────────────────────
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enabled = false; 
-
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-
-controls.enableRotate = true;
-controls.enableZoom = true;
-controls.enablePan = false;
-
-controls.minDistance = 0.5;
-controls.maxDistance = 1.2;
-
+let controls;
 
 // ─────────────────────────────────────────────
 // AMBIENT LIGHTING
 // ─────────────────────────────────────────────
-scene.add(new THREE.AmbientLight(0xffffff, 5.0));
+//scene.add(new THREE.AmbientLight(0xffffff, 5.0));
 
 // ─────────────────────────────────────────────
 // ENVIRONMENT
 // ─────────────────────────────────────────────
-const pmrem = new THREE.PMREMGenerator(renderer);
+function setupEnvironment() {
 
-new EXRLoader().load('./studio.exr', (hdr) => {
-	
-  hdr.mapping = THREE.EquirectangularReflectionMapping;
+	new EXRLoader().load('./studio.exr', (hdr) => {
 
-  const tempScene = new THREE.Scene();
+	  hdr.mapping = THREE.EquirectangularReflectionMapping;
 
-  const saturation = 0.0; // remove color from HDRI
+	  if (renderer.isWebGPURenderer) {
 
-  const material = new THREE.ShaderMaterial({
-    uniforms: {
-      tMap: { value: hdr },
-	  saturation: { value: saturation },
-	  contrast: { value: 2.15 } 
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D tMap;
-      uniform float saturation;
-	  uniform float contrast;
-      varying vec2 vUv;
+		// ✅ WebGPU → usar directamente
+		scene.environment = hdr;
 
-      void main() {
-        vec4 color = texture2D(tMap, vUv);
+	  } else {
 
-        float luminance = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-        vec3 grey = vec3(luminance);
+		// ✅ WebGL → usar PMREM
+		const pmrem = new THREE.PMREMGenerator(renderer);
+		pmrem.compileEquirectangularShader();
 
-        color.rgb = mix(grey, color.rgb, saturation);
-		
-		color.rgb = (color.rgb - 0.5) * contrast + 0.5;
+		const envMap = pmrem.fromEquirectangular(hdr).texture;
+		scene.environment = envMap;
 
-        gl_FragColor = color;
-      }
-    `,
-    side: THREE.DoubleSide
-  });
+		pmrem.dispose();
+		hdr.dispose();
+	  }
 
-  const quad = new THREE.Mesh(
-    new THREE.PlaneGeometry(2, 2),
-    material
-  );
+	  scene.environmentRotation = new THREE.Euler(0, Math.PI * 1.5, 0);
+	  scene.environmentIntensity = 6.0;
 
-  tempScene.add(quad);
-
-  const renderTarget = new THREE.WebGLRenderTarget(
-    hdr.image.width,
-    hdr.image.height
-  );
-
-  renderer.setRenderTarget(renderTarget);
-  renderer.render(tempScene, new THREE.Camera());
-  renderer.setRenderTarget(null);
-
-  const processedEnvMap = pmrem.fromEquirectangular(renderTarget.texture).texture;
-
-  scene.environment = processedEnvMap;
-  scene.environmentRotation = new THREE.Euler(0, Math.PI * 0.5, 0);
-  scene.environmentIntensity = 7.5;
-
-  hdr.dispose();
-  renderTarget.dispose();
-});
-
-
-
+	});
+}
 // ─────────────────────────────────────────────
 // SMOOTH SWITCH CAMERAS
 // ─────────────────────────────────────────────
@@ -468,6 +527,9 @@ function smoothSwitchCamera(name) {
 // RESIZE
 // ─────────────────────────────────────────────
 window.addEventListener('resize', () => {
+
+  if (!renderer) return;
+
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -477,7 +539,17 @@ window.addEventListener('resize', () => {
 // LOOP ANIMATE
 // ─────────────────────────────────────────────
 function animate(time) {
-  requestAnimationFrame(animate);
+	
+	frames++;
+
+	if (time > lastTime + 1000) {
+	  fps = Math.round((frames * 1000) / (time - lastTime));
+	  lastTime = time;
+	  frames = 0;
+
+	  fpsLabel.textContent = `FPS: ${fps}`;
+	}
+  animationId = requestAnimationFrame(animate);
 
   // ─────────────────────────────────────────
   // CAMERA TRANSITIONS (Still Cameras)
@@ -615,9 +687,15 @@ function animate(time) {
   // ─────────────────────────────────────────
   // RENDER
   // ─────────────────────────────────────────
-  renderer.render(scene, camera);
-}
+  
+	if (!isRendererReady) return;
 
+	if (renderer.isWebGPURenderer) {
+	  renderer.renderAsync(scene, camera);
+	} else {
+	  renderer.render(scene, camera);
+	}
+	}
 
 // ─────────────────────────────────────────────
 // CAMERA BUTTONS UI
@@ -659,9 +737,108 @@ cameraButtons.forEach(({ label, name }) => {
   ui.appendChild(btn);
 });
 
+const rendererLabel = document.createElement('div');
 
-loadModel(currentConfig);
-animate();
+rendererLabel.style.position = 'fixed';
+rendererLabel.style.top = '20px';
+rendererLabel.style.left = '20px';
+rendererLabel.style.padding = '6px 10px';
+rendererLabel.style.background = 'rgba(0,0,0,0.7)';
+rendererLabel.style.color = '#fff';
+rendererLabel.style.fontSize = '12px';
+rendererLabel.style.fontFamily = 'monospace';
+rendererLabel.style.borderRadius = '4px';
+rendererLabel.style.zIndex = '100';
+
+rendererLabel.textContent = 'Renderer: detecting...';
+
+const fpsLabel = document.createElement('div');
+
+fpsLabel.style.position = 'fixed';
+fpsLabel.style.top = '50px';
+fpsLabel.style.left = '20px';
+fpsLabel.style.padding = '6px 10px';
+fpsLabel.style.background = 'rgba(0,0,0,0.7)';
+fpsLabel.style.color = '#0f0';
+fpsLabel.style.fontSize = '12px';
+fpsLabel.style.fontFamily = 'monospace';
+fpsLabel.style.borderRadius = '4px';
+fpsLabel.style.zIndex = '100';
+
+fpsLabel.textContent = 'FPS: --';
+
+document.body.appendChild(fpsLabel);
+
+document.body.appendChild(rendererLabel);
+
+const modeUI = document.createElement('div');
+
+modeUI.style.position = 'fixed';
+modeUI.style.top = '90px';
+modeUI.style.left = '20px';
+modeUI.style.display = 'flex';
+modeUI.style.gap = '6px';
+modeUI.style.zIndex = '100';
+
+document.body.appendChild(modeUI);
+
+const modes = [
+  { label: 'AUTO', value: 'auto' },
+  { label: 'WEBGPU', value: 'webgpu' },
+  { label: 'WEBGL', value: 'webgl' }
+];
+
+modes.forEach(({ label, value }) => {
+
+  const btn = document.createElement('button');
+  btn.textContent = label;
+
+  btn.style.padding = '6px 10px';
+  btn.style.border = 'none';
+  btn.style.borderRadius = '4px';
+  btn.style.cursor = 'pointer';
+  btn.style.background = '#222';
+  btn.style.color = '#fff';
+  btn.style.fontSize = '11px';
+
+  btn.onclick = async () => {
+    renderMode = value;
+    await restartApp();
+  };
+
+  modeUI.appendChild(btn);
+});
+
+async function init() {
+  await initRenderer();
+  
+  const isWebGPU = renderer.isWebGPURenderer;
+
+	// 🎨 background color
+	scene.background = new THREE.Color(
+	  isWebGPU ? 0xffffff : 0xf2f2f2
+	);
+
+  // CONTROLS (ahora que renderer existe)
+  controls = new OrbitControls(camera, renderer.domElement);
+
+  controls.enabled = false;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.enableRotate = true;
+  controls.enableZoom = true;
+  controls.enablePan = false;
+  controls.minDistance = 0.5;
+  controls.maxDistance = 1.2;
+
+  // ENVIRONMENT (IMPORTANTE → depende de renderer)
+  setupEnvironment();
+
+  loadModel(currentConfig);
+  animate();
+}
+
+init();
 
 
 
