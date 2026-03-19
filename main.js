@@ -44,7 +44,7 @@ let currentConfig = {
   startCamera: 'Cam_Front',
 
   glass: {
-    animate: false
+    animate: true
   },
 
 };
@@ -57,7 +57,7 @@ const loader = new GLTFLoader();
 
 let glassAnimationEnabled = true;
 let activeCameraName = null;
-let glassAnimateCamera = null;
+const glassAnimateCamera = "Cam_Lenses";
 let wasAnimatingGlass = false;
 
 
@@ -83,11 +83,13 @@ function selectVariant(scene, variantName) {
         if (variant.name === variantName) {
 
           gltfData.parser.getDependency('material', map.material)
-            .then((material) => {
+		  .then((material) => {
 
-              obj.material = material;
+			obj.material = material;
 
-            });
+			rebuildGlassMaterials();
+
+		  });
 
         }
 
@@ -97,8 +99,51 @@ function selectVariant(scene, variantName) {
 
   });
 
+setTimeout(() => {
+  rebuildGlassMaterials();
+}, 0);
+
 }
 
+// ─────────────────────────────
+// REBUILD GLASS MATERIAL
+// ─────────────────────────────
+
+function rebuildGlassMaterials() {
+
+  glassMaterials.length = 0;
+  originalGlassColors.length = 0;
+  originalGlassOpacities.length = 0;
+
+  currentModel.traverse(obj => {
+
+    if (!obj.isMesh || !obj.material) return;
+
+    const materials = Array.isArray(obj.material)
+      ? obj.material
+      : [obj.material];
+
+    materials.forEach((m) => {
+
+      if (!m.name) return;
+
+      if (m.name.toLowerCase().includes("anim")) {
+
+        glassMaterials.push(m);
+        originalGlassColors.push(m.color.clone());
+        originalGlassOpacities.push(m.opacity ?? 1.0);
+		
+		console.log("REBUILD DONE", glassMaterials.length);
+
+        m.transparent = true;
+      }
+
+    });
+
+  });
+
+  console.log("Glass materials rebuilt:", glassMaterials.length);
+}
 // ─────────────────────────────
 // UI FOR MODEL SELECTION
 // ─────────────────────────────
@@ -160,7 +205,6 @@ function createVariantButtons(variants) {
 function loadModel(config) {
 	
   glassAnimationEnabled = config.glass?.animate === true;
-  glassAnimateCamera = config.glass?.animateCamera || null;
 
 
   // ───── clean last model
@@ -254,6 +298,30 @@ function loadModel(config) {
 
 	  const mat = obj.material;
 	  if (!mat) return;
+	  
+	  const materials = Array.isArray(mat) ? mat : [mat];
+
+		materials.forEach((m) => {
+
+		  if (!m.name) return;
+
+		  if (m.name.toLowerCase().includes("anim")) {
+
+			// evitar duplicados
+			if (!glassMaterials.includes(m)) {
+
+			  glassMaterials.push(m);
+
+			  // guardar estado original
+			  originalGlassColors.push(m.color.clone());
+			  originalGlassOpacities.push(m.opacity ?? 1.0);
+
+			  // asegurar transparencia
+			  m.transparent = true;
+			}
+		  }
+
+		});
 
 	  const isWebGPU = renderer.isWebGPURenderer;
 
