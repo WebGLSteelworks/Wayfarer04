@@ -38,7 +38,7 @@ let animationId = null;
 
 let currentConfig = {
 
-  glbLow: './models/Standard_Wayfarer_low.glb',
+  glbLow: './models/Standard_Wayfarer_loow.glb',
   glbHigh: './models/Standard_Wayfarer_high.glb',
 
   startCamera: 'Cam_Front',
